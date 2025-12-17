@@ -1,15 +1,8 @@
 from flask import Flask, request
 import os
-import asyncio
 
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters
 
 from pdf2docx import Converter
 from docx import Document
@@ -38,41 +31,42 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 app = Flask(__name__)
 
 # =========================
-# Telegram Application (NEW API)
+# Telegram Bot & Dispatcher (Sync)
 # =========================
-application = ApplicationBuilder().token(TOKEN).build()
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot, None, workers=0, use_context=True)
 
 # =========================
 # /start command
 # =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+def start(update, context):
+    update.message.reply_text(
         "📁 Converter Botga xush kelibsiz!\n"
         "PDF / DOCX / JPG / PNG fayl yuboring."
     )
 
-application.add_handler(CommandHandler("start", start))
+dp.add_handler(CommandHandler("start", start))
 
 # =========================
 # Fayl handler
 # =========================
 MAX_FILE_SIZE_MB = 5
 
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def file_handler(update, context):
     doc = update.message.document
     if not doc:
-        await update.message.reply_text("❌ Fayl topilmadi")
+        update.message.reply_text("❌ Fayl topilmadi")
         return
 
     if doc.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        await update.message.reply_text(
+        update.message.reply_text(
             f"❌ Fayl juda katta! Maks {MAX_FILE_SIZE_MB} MB"
         )
         return
 
     file_path = os.path.join(UPLOAD, doc.file_name)
-    new_file = await doc.get_file()
-    await new_file.download_to_drive(file_path)
+    new_file = bot.get_file(doc.file_id)
+    new_file.download(custom_path=file_path)
 
     ext = doc.file_name.lower()
 
@@ -84,7 +78,7 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cv.convert(out)
             cv.close()
 
-        # DOCX → TXT (PDF emas, xavfsiz variant)
+        # DOCX → TXT
         elif ext.endswith(".docx"):
             out = file_path.replace(".docx", ".txt")
             d = Document(file_path)
@@ -101,16 +95,16 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f.write(text)
 
         else:
-            await update.message.reply_text("❌ Bu format qo‘llab-quvvatlanmaydi")
+            update.message.reply_text("❌ Bu format qo‘llab-quvvatlanmaydi")
             return
 
-        await update.message.reply_document(
+        update.message.reply_document(
             document=open(out, "rb"),
             caption="✅ Tayyor!"
         )
 
     except Exception as e:
-        await update.message.reply_text(f"⚠ Xatolik: {e}")
+        update.message.reply_text(f"⚠ Xatolik: {e}")
 
     finally:
         if os.path.exists(file_path):
@@ -118,18 +112,16 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "out" in locals() and os.path.exists(out):
             os.remove(out)
 
-application.add_handler(MessageHandler(filters.Document.ALL, file_handler))
+dp.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 
 # =========================
-# Webhook route (ASYNC)
+# Webhook route
 # =========================
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    # async functionni sync ga o‘tkazish
-    asyncio.run(application.process_update(update))
+    update = Update.de_json(request.get_json(force=True), bot)
+    dp.process_update(update)
     return "OK"
-
 
 @app.route("/")
 def index():
