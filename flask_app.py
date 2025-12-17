@@ -124,10 +124,12 @@ application.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 # Webhook route (ASYNC)
 # =========================
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
+def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
+    # async functionni sync ga o‘tkazish
+    asyncio.run(application.process_update(update))
     return "OK"
+
 
 @app.route("/")
 def index():
