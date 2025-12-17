@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: telegram-flask-bot
-    env: python
-    plan: free
-    pythonVersion: 3.11
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn flask_app:app
