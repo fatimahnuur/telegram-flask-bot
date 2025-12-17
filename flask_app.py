@@ -1,17 +1,27 @@
 from flask import Flask, request
 import os
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, filters
+import asyncio
+
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
 from pdf2docx import Converter
 from docx import Document
-from PyPDF2 import PdfReader
 from PIL import Image
 import pytesseract
 
 # =========================
 # Telegram token
 # =========================
-TOKEN = os.getenv("BOT_TOKEN")  # Render/Environment variables-da qo'shing
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable topilmadi")
 
 # =========================
 # Fayllar /tmp ichida saqlanadi
@@ -19,99 +29,113 @@ TOKEN = os.getenv("BOT_TOKEN")  # Render/Environment variables-da qo'shing
 UPLOAD = "/tmp/files"
 os.makedirs(UPLOAD, exist_ok=True)
 
-# Tesseract manzili (Linux serverlarda)
-pytesseract.pytesseract.tesseract_cmd = r"/usr/bin/tesseract"
+# Tesseract (agar Render’da bo‘lsa)
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # =========================
-# Flask app va bot
+# Flask app
 # =========================
 app = Flask(__name__)
-bot = Bot(token=TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0)
+
+# =========================
+# Telegram Application (NEW API)
+# =========================
+application = ApplicationBuilder().token(TOKEN).build()
 
 # =========================
 # /start command
 # =========================
-def start(update, context):
-    update.message.reply_text(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "📁 Converter Botga xush kelibsiz!\n"
-        "Fayl yuboring (PDF/DOCX/JPG/PNG)."
+        "PDF / DOCX / JPG / PNG fayl yuboring."
     )
 
-dispatcher.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("start", start))
 
 # =========================
 # Fayl handler
 # =========================
-MAX_FILE_SIZE_MB = 5  # Fayl hajmi limit
+MAX_FILE_SIZE_MB = 5
 
-def file_handler(update, context):
+async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc:
-        update.message.reply_text("❌ Fayl topilmadi")
+        await update.message.reply_text("❌ Fayl topilmadi")
         return
 
     if doc.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        update.message.reply_text(f"❌ Fayl juda katta! Maks {MAX_FILE_SIZE_MB} MB")
+        await update.message.reply_text(
+            f"❌ Fayl juda katta! Maks {MAX_FILE_SIZE_MB} MB"
+        )
         return
 
-    ext = doc.file_name.lower()
     file_path = os.path.join(UPLOAD, doc.file_name)
-    doc.get_file().download(file_path)
+    new_file = await doc.get_file()
+    await new_file.download_to_drive(file_path)
+
+    ext = doc.file_name.lower()
 
     try:
+        # PDF → DOCX
         if ext.endswith(".pdf"):
             out = file_path.replace(".pdf", ".docx")
             cv = Converter(file_path)
             cv.convert(out)
             cv.close()
 
+        # DOCX → TXT (PDF emas, xavfsiz variant)
         elif ext.endswith(".docx"):
-            out = file_path.replace(".docx", ".pdf")
+            out = file_path.replace(".docx", ".txt")
             d = Document(file_path)
-            text = "\n".join([p.text for p in d.paragraphs])
+            text = "\n".join(p.text for p in d.paragraphs)
             with open(out, "w", encoding="utf-8") as f:
                 f.write(text)
 
+        # IMAGE → TEXT (OCR)
         elif ext.endswith((".png", ".jpg", ".jpeg")):
             out = file_path + ".txt"
             img = Image.open(file_path)
-            text = pytesseract.image_to_string(img, lang="eng+uzb+rus")
+            text = pytesseract.image_to_string(img, lang="eng")
             with open(out, "w", encoding="utf-8") as f:
                 f.write(text)
+
         else:
-            update.message.reply_text("❌ Bu formatni bilmayman")
+            await update.message.reply_text("❌ Bu format qo‘llab-quvvatlanmaydi")
             return
 
-        # Faylni jo'natish
-        update.message.reply_document(open(out, "rb"), caption="✅ Tayyor!")
-        
-        # Temporary fayllarni o'chirish
-        os.remove(file_path)
-        os.remove(out)
+        await update.message.reply_document(
+            document=open(out, "rb"),
+            caption="✅ Tayyor!"
+        )
 
     except Exception as e:
-        update.message.reply_text(f"⚠ Xatolik: {e}")
+        await update.message.reply_text(f"⚠ Xatolik: {e}")
 
-dispatcher.add_handler(MessageHandler(filters.Document.ALL, file_handler))
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if "out" in locals() and os.path.exists(out):
+            os.remove(out)
+
+application.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 
 # =========================
-# Webhook route
+# Webhook route (ASYNC)
 # =========================
 @app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
     return "OK"
 
 @app.route("/")
 def index():
-    return "Bot ishlamoqda!"
+    return "Bot ishlamoqda 🚀"
 
 # =========================
-# Flask app run (development)
+# Flask run
 # =========================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Render avtomatik beradigan port
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
